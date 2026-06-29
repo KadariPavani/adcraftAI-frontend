@@ -43,11 +43,57 @@ function publicLink(url?: string | null): string | null {
   return INTERNAL_ROUTE_RE.test(url) ? null : url;
 }
 
-function buildCaption(post: { caption?: string; hashtags?: string[]; link_url?: string }): string {
+// Pulls the post's UTMs onto whatever base URL we end up with.
+function withUtm(base: string, post: { utm_source?: string|null; utm_medium?: string|null; utm_campaign?: string|null; utm_content?: string|null }): string {
+  const params = new URLSearchParams();
+  if (post.utm_source) params.set("utm_source", post.utm_source);
+  if (post.utm_medium) params.set("utm_medium", post.utm_medium);
+  if (post.utm_campaign) params.set("utm_campaign", post.utm_campaign);
+  if (post.utm_content) params.set("utm_content", post.utm_content);
+  const sep = base.includes("?") ? "&" : "?";
+  const qs = params.toString();
+  return qs ? `${base}${sep}${qs}` : base;
+}
+
+// Build a public, shareable URL for the post. Order:
+//  1) post.link_url if it's not an internal admin route
+//  2) /p/<slug> resolved from product_link_id or product_id
+//  3) /c/<slug> resolved from collection_id
+// Returns null if nothing usable exists — caller decides whether to include it in the share.
+async function resolveShareUrl(post: Record<string, unknown>): Promise<string | null> {
+  const origin = window.location.origin;
+  const linkUrl = post.link_url as string | null | undefined;
+  const safe = publicLink(linkUrl);
+  if (safe) return safe;
+
+  const productLinkId = post.product_link_id as string | null | undefined;
+  if (productLinkId) {
+    const { data } = await supabase.from("product_links").select("slug").eq("id", productLinkId).maybeSingle();
+    if (data?.slug) return withUtm(`${origin}/p/${data.slug}`, post as never);
+  }
+
+  const productId = post.product_id as string | null | undefined;
+  if (productId) {
+    const { data } = await supabase.from("product_links")
+      .select("slug").eq("product_id", productId).eq("is_active", true)
+      .limit(1).maybeSingle();
+    if (data?.slug) return withUtm(`${origin}/p/${data.slug}`, post as never);
+  }
+
+  const collectionId = post.collection_id as string | null | undefined;
+  if (collectionId) {
+    const { data } = await supabase.from("product_collections")
+      .select("slug").eq("id", collectionId).maybeSingle();
+    if (data?.slug) return withUtm(`${origin}/c/${data.slug}`, post as never);
+  }
+
+  return null;
+}
+
+function buildCaption(post: { caption?: string; hashtags?: string[] }, shareUrl: string | null): string {
   let caption = post.caption || "";
   if (post.hashtags?.length) caption += "\n\n" + post.hashtags.map((h) => `#${h}`).join(" ");
-  const link = publicLink(post.link_url);
-  if (link) caption += "\n\n🔗 " + link;
+  if (shareUrl) caption += "\n\n🔗 " + shareUrl;
   return caption;
 }
 
@@ -184,7 +230,9 @@ export async function publishInstagramLocal(postId: string): Promise<Result> {
 
     await diagnoseToken(token, platform);
 
-    const caption = buildCaption(post);
+    const shareUrl = await resolveShareUrl(post);
+    log(platform, "resolved share URL →", shareUrl);
+    const caption = buildCaption(post, shareUrl);
     const hashtagCount = (caption.match(/#\w+/g) || []).length;
     log(platform, "caption", { length: caption.length, hashtagCount });
     if (caption.length > 2200) return { success: false, error: `Caption ${caption.length}/2200 chars` };
@@ -301,14 +349,15 @@ export async function publishFacebookLocal(postId: string): Promise<Result> {
     // publish_actions error). Pass-through if already a Page Token.
     const pageToken = await resolvePageToken(token, pageId, platform);
 
-    const message = buildCaption(post);
+    const shareUrl = await resolveShareUrl(post);
+    log(platform, "resolved share URL →", shareUrl);
+    const message = buildCaption(post, shareUrl);
     const rawImages: string[] = (post.image_urls || []).filter(Boolean);
 
     let data: { id?: string; post_id?: string };
     if (rawImages.length === 0) {
       const body: Record<string, string> = { message, access_token: pageToken };
-      const fbLink = publicLink(post.link_url);
-      if (fbLink) body.link = fbLink;
+      if (shareUrl) body.link = shareUrl;
       log(platform, `POST ${GRAPH}/${pageId}/feed (text only)`);
       const res = await fetch(`${GRAPH}/${pageId}/feed`, {
         method: "POST",
@@ -391,7 +440,9 @@ export async function publishWhatsAppLocal(postId: string): Promise<Result> {
     if (!user) { win.close(); return { success: false, error: "Not signed in" }; }
 
     const post = await loadPost(postId, user.id);
-    const message = buildCaption(post);
+    const shareUrl = await resolveShareUrl(post);
+    log(platform, "resolved share URL →", shareUrl);
+    const message = buildCaption(post, shareUrl);
     const url = `https://wa.me/?text=${encodeURIComponent(message)}`;
     log(platform, "navigating popup →", url);
     win.location.href = url;
