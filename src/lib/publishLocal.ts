@@ -35,10 +35,19 @@ async function loadPost(postId: string, userId: string) {
   return data;
 }
 
+// ponytail: drop URLs that point at our own auth-gated admin routes (eg /social/post/<id>) —
+// they 404/redirect for anyone receiving the share. Add new internal prefixes here as routes grow.
+const INTERNAL_ROUTE_RE = /\/(social|dashboard|auth|generate|catalog|history|voice|analytics|ecommerce|__a)(\/|$|\?)/;
+function publicLink(url?: string | null): string | null {
+  if (!url) return null;
+  return INTERNAL_ROUTE_RE.test(url) ? null : url;
+}
+
 function buildCaption(post: { caption?: string; hashtags?: string[]; link_url?: string }): string {
   let caption = post.caption || "";
   if (post.hashtags?.length) caption += "\n\n" + post.hashtags.map((h) => `#${h}`).join(" ");
-  if (post.link_url) caption += "\n\n🔗 " + post.link_url;
+  const link = publicLink(post.link_url);
+  if (link) caption += "\n\n🔗 " + link;
   return caption;
 }
 
@@ -298,7 +307,8 @@ export async function publishFacebookLocal(postId: string): Promise<Result> {
     let data: { id?: string; post_id?: string };
     if (rawImages.length === 0) {
       const body: Record<string, string> = { message, access_token: pageToken };
-      if (post.link_url) body.link = post.link_url;
+      const fbLink = publicLink(post.link_url);
+      if (fbLink) body.link = fbLink;
       log(platform, `POST ${GRAPH}/${pageId}/feed (text only)`);
       const res = await fetch(`${GRAPH}/${pageId}/feed`, {
         method: "POST",
