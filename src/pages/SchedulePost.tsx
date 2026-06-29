@@ -58,8 +58,35 @@ export default function SchedulePost() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [imageUrls, setImageUrls] = useState<string[]>(prefill.prefillImages || (prefill.productImage ? [prefill.productImage] : []));
+  // Resolved public slug for /p/<slug>. Fetched or auto-created when a product is picked.
+  const [productLinkSlug, setProductLinkSlug] = useState<string | null>(null);
 
   useEffect(() => { fetchCollections(); }, []);
+
+  // Resolve (or auto-create) a product_links row for the selected product so the share URL
+  // hits the public /p/<slug> page instead of an unresolvable /p/<uuid>.
+  useEffect(() => {
+    if (linkType !== "product" || !selectedProductId) { setProductLinkSlug(null); return; }
+    let cancelled = false;
+    (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user || cancelled) return;
+      const { data: existing } = await supabase
+        .from("product_links")
+        .select("slug")
+        .eq("product_id", selectedProductId).eq("user_id", user.id).eq("is_active", true)
+        .limit(1).maybeSingle();
+      if (existing?.slug) { if (!cancelled) setProductLinkSlug(existing.slug); return; }
+      const title = products.find((p) => p.id === selectedProductId)?.title || "product";
+      const base = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30);
+      const slug = `${base}-${Math.random().toString(36).slice(2, 8)}`;
+      const { error } = await supabase.from("product_links").insert({
+        user_id: user.id, product_id: selectedProductId, slug, is_active: true,
+      });
+      if (!cancelled && !error) setProductLinkSlug(slug);
+    })();
+    return () => { cancelled = true; };
+  }, [linkType, selectedProductId, products]);
 
   useEffect(() => {
     if (selectedPlatforms.length > 0 && !utmSource) setUtmSource(selectedPlatforms[0]);
@@ -81,8 +108,8 @@ export default function SchedulePost() {
     if (linkType === "collection" && selectedCollectionId) {
       const coll = collections.find((c) => c.id === selectedCollectionId);
       if (coll) baseUrl = `${window.location.origin}/c/${coll.slug}`;
-    } else if (linkType === "product" && selectedProductId) {
-      baseUrl = `${window.location.origin}/p/${selectedProductId}`;
+    } else if (linkType === "product" && selectedProductId && productLinkSlug) {
+      baseUrl = `${window.location.origin}/p/${productLinkSlug}`;
     } else if (linkType === "custom" && customUrl) {
       baseUrl = customUrl;
     }
